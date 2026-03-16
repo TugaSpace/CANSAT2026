@@ -1,0 +1,183 @@
+#include <Arduino.h>
+#include <Wire.h>
+#include <FreeRTOS.h>
+#include <task.h>
+#include <semphr.h>
+#include <DFRobot_BMP3XX.h>
+#include <Adafruit_Sensor.h>
+#include <Adafruit_BNO055.h>
+#include <utility/imumaths.h>
+
+// Instâncias dos BMP388
+DFRobot_BMP388_I2C bmp_76(&Wire, 0x76);
+DFRobot_BMP388_I2C bmp_77(&Wire, 0x77);
+
+// Instância do BNO055 (ID 55, endereço padrão 0x28)
+Adafruit_BNO055 bno = Adafruit_BNO055(55, 0x29);
+
+// Mutex para o barramento I2C
+SemaphoreHandle_t i2c_mutex;
+
+// Task para BMP388 no 0x76
+void TaskLeituraBMP_76(void *pvParameters) {
+  for (;;) {
+    if (xSemaphoreTake(i2c_mutex, portMAX_DELAY) == pdTRUE) {
+      float temp = bmp_76.readTempC();
+      float press = bmp_76.readPressPa() / 100.0;
+      float alt = bmp_76.readAltitudeM();
+
+      Serial.print("--- BMP388 (0x76) @ "); Serial.print(millis()); Serial.println(" ms ---");
+      Serial.print("Temperatura: "); Serial.print(temp); Serial.println(" *C");
+      Serial.print("Pressao: "); Serial.print(press); Serial.println(" hPa");
+      Serial.print("Altitude: "); Serial.print(alt); Serial.println(" m\n");
+
+      xSemaphoreGive(i2c_mutex);
+    }
+    vTaskDelay(pdMS_TO_TICKS(1000));
+  }
+}
+
+// Task para BMP388 no 0x77
+void TaskLeituraBMP_77(void *pvParameters) {
+  vTaskDelay(pdMS_TO_TICKS(333)); // Pequeno desfasamento
+  for (;;) {
+    if (xSemaphoreTake(i2c_mutex, portMAX_DELAY) == pdTRUE) {
+      float temp = bmp_77.readTempC();
+      float press = bmp_77.readPressPa() / 100.0; 
+      float alt = bmp_77.readAltitudeM();
+
+      Serial.print("--- BMP388 (0x77) @ "); Serial.print(millis()); Serial.println(" ms ---");
+      Serial.print("Temperatura: "); Serial.print(temp); Serial.println(" *C");
+      Serial.print("Pressao: "); Serial.print(press); Serial.println(" hPa");
+      Serial.print("Altitude: "); Serial.print(alt); Serial.println(" m\n");
+
+      xSemaphoreGive(i2c_mutex);
+    }
+    vTaskDelay(pdMS_TO_TICKS(1000));
+  }
+}
+
+// Task para BNO055
+void TaskLeituraBNO055(void *pvParameters) {
+  vTaskDelay(pdMS_TO_TICKS(666)); // Desfasamento para não colidir no arranque
+  
+  // Variáveis para a dupla integração (velocidade e deslocamento)
+  float vel_x = 0.0f, vel_y = 0.0f;
+  float pos_x = 0.0f, pos_y = 0.0f;
+  uint32_t last_time = millis();
+
+  for (;;) {
+    if (xSemaphoreTake(i2c_mutex, portMAX_DELAY) == pdTRUE) {
+      sensors_event_t orientationData, linearAccelData;
+      bno.getEvent(&orientationData, Adafruit_BNO055::VECTOR_EULER);
+      bno.getEvent(&linearAccelData, Adafruit_BNO055::VECTOR_LINEARACCEL); // Aceleração sem gravidade
+      
+      // Ler o estado de calibração interno do sensor
+      uint8_t system, gyro, accel, mag = 0;
+      bno.getCalibration(&system, &gyro, &accel, &mag);
+
+      // Cálculo do dt (intervalo de tempo em segundos desde a última leitura)
+      uint32_t current_time = millis();
+      float dt = (current_time - last_time) / 1000.0f;
+      last_time = current_time;
+
+      // Filtrar ruído residual (deadband) na aceleração para evitar movimento "fantasma"
+      float ax = linearAccelData.acceleration.x;
+      float ay = linearAccelData.acceleration.y;
+      
+      // Aumentamos ligeiramente a tolerância da zona morta
+      if (abs(ax) < 0.20f) ax = 0.0f;
+      if (abs(ay) < 0.20f) ay = 0.0f;
+
+      // 1ª Integração: Atualizar Velocidade (v = v + a*dt)
+      vel_x += ax * dt;
+      vel_y += ay * dt;
+
+      // --- O SEGREDO ESTÁ AQUI: Aplicação de "Atrito" (Leaky Integrator) ---
+      // Em vez de forçar a 0, dissipamos a velocidade no final do movimento para evitar ricochete
+      if (ax == 0.0f) {
+        vel_x *= 0.85f; // Travão forte: perde 15% da velocidade a cada ciclo (50ms)
+      } else {
+        vel_x *= 0.98f; // Atrito leve contínuo: perde 2% mesmo em movimento para conter erros
+      }
+
+      if (ay == 0.0f) {
+        vel_y *= 0.85f;
+      } else {
+        vel_y *= 0.98f;
+      }
+
+      // Cortar a "velocidade zombie" (valores residuais minúsculos)
+      if (abs(vel_x) < 0.02f) vel_x = 0.0f;
+      if (abs(vel_y) < 0.02f) vel_y = 0.0f;
+
+      // 2ª Integração: Atualizar Deslocamento/Posição (s = s + v*dt)
+      pos_x += vel_x * dt;
+      pos_y += vel_y * dt;
+
+      Serial.print("--- BNO055 @ "); Serial.print(millis()); Serial.println(" ms ---");
+      Serial.print("Orientacao X (Yaw): "); Serial.print(orientationData.orientation.x); Serial.print(" graus  ");
+      Serial.print("Y (Pitch): "); Serial.print(orientationData.orientation.y); Serial.print(" graus  ");
+      Serial.print("Z (Roll): "); Serial.print(orientationData.orientation.z); Serial.println(" graus\n");
+      
+      Serial.print("Acel. Linear X: "); Serial.print(ax); Serial.print(" m/s^2 | Y: "); Serial.print(ay); Serial.println(" m/s^2");
+      Serial.print("Deslocamento X: "); Serial.print(pos_x); Serial.print(" m     | Y: "); Serial.print(pos_y); Serial.println(" m\n");
+      
+      Serial.print("Calibracao (0 a 3) -> Sys: "); Serial.print(system);
+      Serial.print(" | Giroscopio: "); Serial.print(gyro);
+      Serial.print(" | Acelerometro: "); Serial.print(accel);
+      Serial.print(" | Magnetometro: "); Serial.println(mag);
+      Serial.println();
+
+      xSemaphoreGive(i2c_mutex);
+    }
+    vTaskDelay(pdMS_TO_TICKS(10)); // Reduzido para 50ms (20Hz) para melhorar a precisão da integração
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  while (!Serial); 
+  delay(2000);
+  
+  Wire.begin();
+  Serial.println("A iniciar sensores...\n");
+
+  // Inicializar o Mutex
+  i2c_mutex = xSemaphoreCreateMutex();
+
+  if (bmp_76.begin() != 0) {
+    Serial.println("Falha ao inicializar o BMP388 no 0x76!");
+  } else {
+    Serial.println("BMP388 (0x76) inicializado com sucesso!");
+  }
+ delay(1000);
+  if (bmp_77.begin() != 0) {
+    Serial.println("Falha ao inicializar o BMP388 no 0x77!");
+  } else {
+    Serial.println("BMP388 (0x77) inicializado com sucesso!");
+  }
+   delay(1000);
+  // O Teensy arranca muito rápido. Dar 500ms para o BNO055 ligar o processador interno.
+  
+
+  // Inicializar o BNO055
+  if (!bno.begin()) {
+    Serial.println("Falha ao inicializar o BNO055! Verifica as ligacoes e o endereco I2C.");
+  } else {
+    Serial.println("BNO055 inicializado com sucesso!");
+    bno.setExtCrystalUse(true); // O uso do cristal externo e recomendado para estabilidade
+  }
+ delay(2000);
+  // Criar as Tasks
+  xTaskCreate(TaskLeituraBMP_76, "Task 76", 1024, NULL, 1, NULL);
+  xTaskCreate(TaskLeituraBMP_77, "Task 77", 1024, NULL, 1, NULL);
+  xTaskCreate(TaskLeituraBNO055, "Task BNO", 1024, NULL, 1, NULL);
+
+  // Iniciar o RTOS
+  vTaskStartScheduler();
+}
+
+void loop() {
+  // Vazio, controlado pelo FreeRTOS
+}
