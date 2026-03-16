@@ -64,6 +64,10 @@ void TaskLeituraBNO055(void *pvParameters) {
   // Variáveis para a dupla integração (velocidade e deslocamento)
   float vel_x = 0.0f, vel_y = 0.0f;
   float pos_x = 0.0f, pos_y = 0.0f;
+  float last_ax = 0.0f, last_ay = 0.0f;       // Histórico para Integração Trapezoidal
+  float last_vel_x = 0.0f, last_vel_y = 0.0f; // Histórico para Integração Trapezoidal
+  float bias_x = 0.0f, bias_y = 0.0f;         // Erro estático contínuo (Bias)
+  uint32_t tempo_parado = 0;                  // Temporizador para reset automático
   uint32_t last_time = millis();
 
   for (;;) {
@@ -81,39 +85,77 @@ void TaskLeituraBNO055(void *pvParameters) {
       float dt = (current_time - last_time) / 1000.0f;
       last_time = current_time;
 
-      // Filtrar ruído residual (deadband) na aceleração para evitar movimento "fantasma"
-      float ax = linearAccelData.acceleration.x;
-      float ay = linearAccelData.acceleration.y;
+      float raw_ax = linearAccelData.acceleration.x;
+      float raw_ay = linearAccelData.acceleration.y;
       
-      // Aumentamos ligeiramente a tolerância da zona morta
-      if (abs(ax) < 0.20f) ax = 0.0f;
-      if (abs(ay) < 0.20f) ay = 0.0f;
+      // --- SALVAGUARDA DE INCLINAÇÃO (GRAVIDADE) ---
+      // Se o sensor não estiver minimamente calibrado (Sys == 0), o cálculo da gravidade interna
+      // pode falhar. Ignoramos as leituras para evitar que a inclinação injete erros colossais.
+      if (system == 0) {
+        raw_ax = 0.0f;
+        raw_ay = 0.0f;
+      }
 
-      // 1ª Integração: Atualizar Velocidade (v = v + a*dt)
-      vel_x += ax * dt;
-      vel_y += ay * dt;
+      // --- 1. FILTRO DINÂMICO DE BIAS (Auto-Calibração Contínua) ---
+      // Se a aceleração é baixa, assumimos que está parado. O valor que vemos é o "ruído base".
+      // Usamos uma média móvel exponencial para aprender este ruído lentamente.
+      if (abs(raw_ax) < 0.25f && abs(raw_ay) < 0.25f) {
+        bias_x = (0.95f * bias_x) + (0.05f * raw_ax);
+        bias_y = (0.95f * bias_y) + (0.05f * raw_ay);
+      }
+
+      // Subtrair o "ruído base" da aceleração lida
+      float ax = raw_ax - bias_x;
+      float ay = raw_ay - bias_y;
+      
+      // Como subtraímos o ruído matematicamente, podemos ser muito mais sensíveis aos movimentos reais!
+      if (abs(ax) < 0.08f) ax = 0.0f;
+      if (abs(ay) < 0.08f) ay = 0.0f;
+
+      // --- 2. INTEGRAÇÃO TRAPEZOIDAL DA VELOCIDADE ---
+      // A média entre a aceleração anterior e a atual x tempo
+      vel_x += ((ax + last_ax) / 2.0f) * dt;
+      vel_y += ((ay + last_ay) / 2.0f) * dt;
 
       // --- O SEGREDO ESTÁ AQUI: Aplicação de "Atrito" (Leaky Integrator) ---
-      // Em vez de forçar a 0, dissipamos a velocidade no final do movimento para evitar ricochete
       if (ax == 0.0f) {
-        vel_x *= 0.85f; // Travão forte: perde 15% da velocidade a cada ciclo (50ms)
+        vel_x *= 0.80f; // Travão ligeiramente mais forte
       } else {
-        vel_x *= 0.98f; // Atrito leve contínuo: perde 2% mesmo em movimento para conter erros
+        vel_x *= 0.98f; 
       }
 
       if (ay == 0.0f) {
-        vel_y *= 0.85f;
+        vel_y *= 0.80f;
       } else {
         vel_y *= 0.98f;
       }
 
       // Cortar a "velocidade zombie" (valores residuais minúsculos)
-      if (abs(vel_x) < 0.02f) vel_x = 0.0f;
-      if (abs(vel_y) < 0.02f) vel_y = 0.0f;
+      if (abs(vel_x) < 0.01f) vel_x = 0.0f;
+      if (abs(vel_y) < 0.01f) vel_y = 0.0f;
 
-      // 2ª Integração: Atualizar Deslocamento/Posição (s = s + v*dt)
-      pos_x += vel_x * dt;
-      pos_y += vel_y * dt;
+      // --- 3. RESET AUTOMÁTICO DE POSIÇÃO (Anti-Deriva Longa) ---
+      // Se o dispositivo não registar aceleração por mais de 5 segundos contínuos,
+      // assumimos que o movimento terminou. Zeramos a posição para limpar a deriva acumulada.
+      if (ax == 0.0f && ay == 0.0f) {
+        tempo_parado += (current_time - last_time);
+        if (tempo_parado > 5000) { // 5000 ms = 5 segundos perfeitamente parado
+          pos_x = 0.0f;
+          pos_y = 0.0f;
+        }
+      } else {
+        tempo_parado = 0;
+      }
+
+      // --- 4. INTEGRAÇÃO TRAPEZOIDAL DA POSIÇÃO ---
+      pos_x += ((vel_x + last_vel_x) / 2.0f) * dt;
+      pos_y += ((vel_y + last_vel_y) / 2.0f) * dt;
+
+      // Guardar valores atuais para servirem de "anterior" no próximo ciclo
+      last_ax = ax;
+      last_ay = ay;
+      last_vel_x = vel_x;
+      last_vel_y = vel_y;
 
       Serial.print("--- BNO055 @ "); Serial.print(millis()); Serial.println(" ms ---");
       Serial.print("Orientacao X (Yaw): "); Serial.print(orientationData.orientation.x); Serial.print(" graus  ");
