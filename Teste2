@@ -1,0 +1,132 @@
+#include <Arduino.h>
+#include <Wire.h>
+#include <FreeRTOS.h>
+#include <task.h>
+#include <semphr.h>
+#include <DFRobot_BMP3XX.h>
+#include <Adafruit_Sensor.h>
+#include <Adafruit_ADXL375.h>
+
+// Criar instâncias dos dois sensores indicando o barramento e o endereço
+DFRobot_BMP388_I2C bmp_76(&Wire, 0x76);
+DFRobot_BMP388_I2C bmp_77(&Wire, 0x77);
+
+// Criar instância do acelerómetro (o ID 12345 é apenas um identificador interno da Adafruit)
+Adafruit_ADXL375 adxl = Adafruit_ADXL375(12345);
+
+// Declarar o Mutex para o I2C
+SemaphoreHandle_t i2c_mutex;
+
+// Task para ler o Sensor no endereço 0x76
+void TaskLeituraBMP_76(void *pvParameters) {
+  for (;;) {
+    // Pede autorização para usar o I2C (aguarda até que esteja livre)
+    if (xSemaphoreTake(i2c_mutex, portMAX_DELAY) == pdTRUE) {
+      
+      float temp = bmp_76.readTempC();
+      float press = bmp_76.readPressPa() / 100.0; // Converter de Pa para hPa
+      float alt = bmp_76.readAltitudeM();
+
+      Serial.print("--- BMP388 (0x76) @ "); 
+      Serial.print(millis()); 
+      Serial.println(" ms ---");
+      Serial.print("Temperatura: "); Serial.print(temp); Serial.println(" *C");
+      Serial.print("Pressao: "); Serial.print(press); Serial.println(" hPa");
+      Serial.print("Altitude: "); Serial.print(alt); Serial.println(" m\n");
+
+      // Devolve a autorização, libertando o I2C para a outra Task
+      xSemaphoreGive(i2c_mutex);
+    }
+    vTaskDelay(pdMS_TO_TICKS(1000));
+  }
+}
+
+// Task para ler o Sensor no endereço 0x77
+void TaskLeituraBMP_77(void *pvParameters) {
+  // Um pequeno atraso inicial para que as duas Tasks fiquem desfasadas
+  vTaskDelay(pdMS_TO_TICKS(1000));
+  
+  for (;;) {
+    if (xSemaphoreTake(i2c_mutex, portMAX_DELAY) == pdTRUE) {
+      
+      float temp = bmp_77.readTempC();
+      float press = bmp_77.readPressPa() / 100.0; 
+      float alt = bmp_77.readAltitudeM();
+
+      Serial.print("--- BMP388 (0x77) @ "); 
+      Serial.print(millis()); 
+      Serial.println(" ms ---");
+      Serial.print("Temperatura: "); Serial.print(temp); Serial.println(" *C");
+      Serial.print("Pressao: "); Serial.print(press); Serial.println(" hPa");
+      Serial.print("Altitude: "); Serial.print(alt); Serial.println(" m\n");
+
+      xSemaphoreGive(i2c_mutex);
+    }
+    vTaskDelay(pdMS_TO_TICKS(1000));
+  }
+}
+
+// Task para ler o Sensor ADXL375
+void TaskLeituraADXL375(void *pvParameters) {
+  // Um atraso inicial para que as 3 Tasks fiquem desfasadas no tempo
+  vTaskDelay(pdMS_TO_TICKS(1500));
+  
+  for (;;) {
+    if (xSemaphoreTake(i2c_mutex, portMAX_DELAY) == pdTRUE) {
+      
+      sensors_event_t event; 
+      adxl.getEvent(&event);
+
+      Serial.print("--- ADXL375 @ "); 
+      Serial.print(millis()); 
+      Serial.println(" ms ---");
+      Serial.print("Aceleracao X: "); Serial.print(event.acceleration.x); Serial.print(" m/s^2  ");
+      Serial.print("Y: "); Serial.print(event.acceleration.y); Serial.print(" m/s^2  ");
+      Serial.print("Z: "); Serial.print(event.acceleration.z); Serial.println(" m/s^2\n");
+
+      xSemaphoreGive(i2c_mutex);
+    }
+    vTaskDelay(pdMS_TO_TICKS(100));
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  while (!Serial); // Aguarda a abertura do monitor série
+  
+  Wire.begin();
+  Serial.println("A iniciar sensores com a biblioteca DFRobot...\n");
+
+  // Inicializar o Mutex do FreeRTOS
+  i2c_mutex = xSemaphoreCreateMutex();
+
+  if (bmp_76.begin() != 0) {
+    Serial.println("Falha ao inicializar o BMP388 no endereco 0x76!");
+  } else {
+    Serial.println("BMP388 (0x76) inicializado com sucesso!");
+  }
+
+  if (bmp_77.begin() != 0) {
+    Serial.println("Falha ao inicializar o BMP388 no endereco 0x77!");
+  } else {
+    Serial.println("BMP388 (0x77) inicializado com sucesso!");
+  }
+  
+  if (!adxl.begin()) {
+    Serial.println("Falha ao inicializar o ADXL375! Verifica as ligacoes.");
+  } else {
+    Serial.println("ADXL375 inicializado com sucesso!");
+  }
+
+  // Criar as Tasks
+  xTaskCreate(TaskLeituraBMP_76, "Task 76", 1024, NULL, 1, NULL);
+  xTaskCreate(TaskLeituraBMP_77, "Task 77", 1024, NULL, 1, NULL);
+  xTaskCreate(TaskLeituraADXL375, "Task ADXL", 1024, NULL, 1, NULL);
+
+  // Iniciar o RTOS
+  vTaskStartScheduler();
+}
+
+void loop() {
+  // Vazio, controlado pelo FreeRTOS
+}
