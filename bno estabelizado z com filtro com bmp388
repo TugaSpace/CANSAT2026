@@ -227,7 +227,7 @@ void TaskLeituraBNO055(void *pvParameters) {
 
       xSemaphoreGive(i2c_mutex);
     }
-    vTaskDelay(pdMS_TO_TICKS(10)); // Reduzido para 50ms (20Hz) para melhorar a precisão da integração
+    vTaskDelay(pdMS_TO_TICKS(10)); // Reduzido para 10ms (100Hz) para melhorar a precisão da integração
   }
 }
 
