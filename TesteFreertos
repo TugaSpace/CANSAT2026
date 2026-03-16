@@ -1,0 +1,62 @@
+#include <Arduino.h>
+#include <Wire.h>
+#include <FreeRTOS.h>
+#include <task.h>
+#include <Adafruit_Sensor.h>
+#include "Adafruit_BMP3XX.h"
+
+#define SEALEVELPRESSURE_HPA (1013.25)
+
+Adafruit_BMP3XX bmp;
+
+// Declaração da Task
+void TaskLeituraBMP(void *pvParameters) {
+  for (;;) { // Loop infinito da Task
+    if (!bmp.performReading()) {
+      Serial.println("Falha ao ler o sensor!");
+    } else {
+
+      Serial.println("freeRTOS");
+      Serial.print("Temperatura: "); Serial.print(bmp.temperature); Serial.println(" *C");
+      Serial.print("Pressão: "); Serial.print(bmp.pressure / 100.0); Serial.println(" hPa");
+      Serial.print("Altitude Aprox.: "); Serial.print(bmp.readAltitude(SEALEVELPRESSURE_HPA)); Serial.println(" m\n");
+    }
+
+    // Aguarda 1 segundo, libertando o processador para outras Tasks (em vez de usar 'delay')
+    vTaskDelay(pdMS_TO_TICKS(200));
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  while (!Serial); // Aguarda que o monitor série abra
+
+  Serial.println("A iniciar o Sensor BMP388...");
+
+  // Iniciar comunicação I2C (Pinos 18 SDA e 19 SCL no Teensy 4.1)
+  // O endereço padrão da biblioteca é 0x77. Muitos módulos genéricos usam 0x76.
+  if (!bmp.begin_I2C(0x77)) {
+    Serial.println("Falha no endereco 0x77, a testar 0x76...");
+    if (!bmp.begin_I2C(0x76)) {
+      Serial.println("BMP388 não encontrado. Verifica as ligações e o endereço I2C!");
+      while (1); // Para o programa se não detetar o sensor
+    }
+  }
+
+  // Configuração recomendada para medições gerais (Oversampling e IIR Filter)
+  bmp.setTemperatureOversampling(BMP3_OVERSAMPLING_8X);
+  bmp.setPressureOversampling(BMP3_OVERSAMPLING_4X);
+  bmp.setIIRFilterCoeff(BMP3_IIR_FILTER_COEFF_3);
+  bmp.setOutputDataRate(BMP3_ODR_50_HZ);
+
+  // Criar a Task do FreeRTOS
+  // Parâmetros: Função, Nome, Tamanho da Stack, Parâmetro, Prioridade, Handle
+  xTaskCreate(TaskLeituraBMP, "Leitura BMP388", 1024, NULL, 1, NULL);
+  
+  // Iniciar o Scheduler (o programa passa a ser controlado pelo FreeRTOS a partir daqui)
+  vTaskStartScheduler();
+}
+
+void loop() {
+  // O loop principal fica vazio, o FreeRTOS toma conta da execução e gere as Tasks
+}
